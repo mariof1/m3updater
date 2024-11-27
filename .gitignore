@@ -1,0 +1,14 @@
+# Exclude all .txt files
+*.txt
+
+# Ignore all files starting with "config" and ending in ".json"
+config*.json
+
+# But explicitly include "config.json.sample"
+!config.json.sample
+
+# Exclude all .m3u files
+*.m3u
+
+config_pl.json
+config_uk.json

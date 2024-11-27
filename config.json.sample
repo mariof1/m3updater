@@ -1,0 +1,15 @@
+{
+    "BaseUrl": "http://line.org/get.php",
+    "Username": "",
+    "Password": "",
+    "Type": "m3u_plus",
+    "Output": "ts",
+    "OriginalPlaylist": "./original_playlist.m3u",
+    "FilteredPlaylist": "./new_playlist.m3u",
+    "GroupsFile": "./groups.txt",
+    "ExtractGroups": true,
+    "ExcludeFilter": ["###", "anime"],
+    "PlaylistAgeThresholdDays": 1,
+    "DebugMode": true,
+    "LogFile": "./script_log.txt"
+}

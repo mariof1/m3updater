@@ -63,7 +63,6 @@ function Log {
 }
 
 # Define other functions (no changes to logic)
-
 function Extract-Groups {
     Log "Extracting groups from the original playlist..."
 
@@ -100,7 +99,7 @@ function Extract-Groups {
     }
 
     # Combine groups
-    $finalGroups = @{}
+    $finalGroups = @{ }
     foreach ($group in $newGroups.Keys) {
         if ($existingGroups.ContainsKey($group)) {
             $finalGroups[$group] = "active"
@@ -173,9 +172,70 @@ function Download-Playlist {
     }
 }
 
-# Main Execution
+# Add EPG Processing Function
+function Process-EPG {
+    Log "Processing EPG data..."
 
-# Ensure ExcludeFilter is defined and valid
+    # Check if EPG processing is enabled in the configuration
+    if (-not $config.EnableEPG) {
+        Log "EPG processing is disabled in the configuration."
+        return
+    }
+
+    # Construct EPG URL
+    $epgUrl = "$($config.BaseUrl.Replace('get.php', 'xmltv.php'))?username=$($config.Username)&password=$($config.Password)"
+    $epgFile = [System.IO.Path]::ChangeExtension($filteredFile, ".xml") # Save EPG alongside filtered playlist with .xml extension
+
+    try {
+        Log "Downloading EPG from '$epgUrl'..."
+        $response = Invoke-WebRequest -Uri $epgUrl -Method Get -UseBasicParsing -ErrorAction Stop
+        if ($response.StatusCode -eq 200) {
+            $response.Content | Set-Content -Path $epgFile -Encoding UTF8
+            Log "EPG data downloaded and saved to '$epgFile'."
+        } else {
+            Log "Failed to download EPG. HTTP Status: $($response.StatusCode) - $($response.StatusDescription)"
+            return
+        }
+    } catch {
+        Log "Failed to download or process EPG: $_. Continuing script execution."
+        return
+    }
+
+    try {
+        # Parse the EPG XML
+        [xml]$epgXml = Get-Content -Path $epgFile
+        Log "Loaded EPG data from '$epgFile'."
+
+        # Extract tvg-id tags from the filtered playlist
+        $filteredTvgIds = @{}
+        Get-Content -Path $filteredFile -Encoding UTF8 | ForEach-Object {
+            if ($_ -like "#EXTINF:*") {
+                $tvgIdMatch = [Regex]::Match($_, 'tvg-id="([^"]*)"')
+                if ($tvgIdMatch.Success) {
+                    $filteredTvgIds[$tvgIdMatch.Groups[1].Value] = $true
+                }
+            }
+        }
+        Log "Extracted tvg-ids from filtered playlist: $($filteredTvgIds.Keys -join ', ')"
+
+        # Filter the EPG to include only relevant channels and programs
+        $epgXml.tv.channel | Where-Object { -Not $filteredTvgIds.ContainsKey($_.id) } | ForEach-Object {
+            $_.ParentNode.RemoveChild($_) | Out-Null
+        }
+        $epgXml.tv.programme | Where-Object { -Not $filteredTvgIds.ContainsKey($_.channel) } | ForEach-Object {
+            $_.ParentNode.RemoveChild($_) | Out-Null
+        }
+
+        # Save the filtered EPG
+        $epgXml.Save($epgFile)
+        Log "Filtered EPG data saved to '$epgFile'."
+
+    } catch {
+        Log "Failed to process the EPG file: $_. Continuing script execution."
+    }
+}
+
+# Main Execution
 $excludeFilter = @()
 if ($null -ne $config.ExcludeFilter) {
     $excludeFilter = $config.ExcludeFilter | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.ToLower() }
@@ -207,7 +267,10 @@ if ($config.ExtractGroups -eq $true) {
 $activeGroups = Get-Active-Groups
 Log "Active groups for filtering: $($activeGroups -join ', ')"
 
-# Filtering logic
+if ($config.EnableEPG -eq $true) {
+    Process-EPG
+}
+
 Write-Host "Filtering playlist by groups has started..."
 $filteredLines = @("#EXTM3U")
 $includeLine = $false

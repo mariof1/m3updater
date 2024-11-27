@@ -1,5 +1,6 @@
 {
     "BaseUrl": "http://line.org/get.php",
+    "EnableEPG": false,
     "Username": "",
     "Password": "",
     "Type": "m3u_plus",

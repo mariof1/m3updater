@@ -65,7 +65,8 @@ The script relies on a configuration file in JSON format. Below is an example of
     "Password": "your_password",
     "Type": "m3u_plus",
     "Output": "ts",
-    "ExtractGroups": true
+    "ExtractGroups": true,
+    "EnableEPG": false
 }
 ```
 

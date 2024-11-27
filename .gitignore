@@ -10,5 +10,7 @@ config*.json
 # Exclude all .m3u files
 *.m3u
 
+*.xml
+
 config_pl.json
 config_uk.json

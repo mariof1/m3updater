@@ -4,23 +4,22 @@ function Resolve-ConfigPath {
         [string]$basePath,
         [string]$path
     )
+    if (-not $path) {
+        throw "Configuration contains an empty or null path. Please check your configuration file."
+    }
     if ([IO.Path]::IsPathRooted($path)) {
-        # If the path is absolute, return as is
         return $path
     } else {
-        # Otherwise, resolve it relative to the base path
         return Join-Path -Path $basePath -ChildPath $path
     }
 }
 
 # Load the configuration file dynamically
 if ($args.Count -eq 0) {
-    # Default config file if no argument is passed
     $scriptPath = Split-Path -Path $MyInvocation.MyCommand.Definition -Parent
     $configFile = Join-Path -Path $scriptPath -ChildPath "config.json"
     Write-Host "No configuration file provided. Using default: $configFile"
 } else {
-    # Use the first argument as the config file path
     $configFile = $args[0]
     Write-Host "Using configuration file: $configFile"
 }
@@ -36,10 +35,15 @@ $config = Get-Content -Path $configFile -Raw | ConvertFrom-Json
 $configBasePath = Split-Path -Path $configFile -Parent
 
 # Resolve paths using the Resolve-ConfigPath function
-$originalFile = Resolve-ConfigPath -basePath $configBasePath -path $config.OriginalPlaylist
-$filteredFile = Resolve-ConfigPath -basePath $configBasePath -path $config.FilteredPlaylist
-$groupsFile = Resolve-ConfigPath -basePath $configBasePath -path $config.GroupsFile
-$logFile = Resolve-ConfigPath -basePath $configBasePath -path $config.LogFile
+try {
+    $originalFile = Resolve-ConfigPath -basePath $configBasePath -path $config.OriginalPlaylist
+    $filteredFile = Resolve-ConfigPath -basePath $configBasePath -path $config.FilteredPlaylist
+    $groupsFile = Resolve-ConfigPath -basePath $configBasePath -path $config.GroupsFile
+    $logFile = Resolve-ConfigPath -basePath $configBasePath -path $config.LogFile
+} catch {
+    Write-Error "Error resolving paths: $_"
+    exit
+}
 
 # Retrieve debug settings
 $debugMode = $config.DebugMode
@@ -62,16 +66,14 @@ function Log {
     }
 }
 
-# Define other functions (no changes to logic)
+# Extract groups from the playlist
 function Extract-Groups {
     Log "Extracting groups from the original playlist..."
-
     if (-Not (Test-Path $originalFile)) {
         Write-Error "Original playlist file not found. Cannot extract groups."
         exit
     }
 
-    # Read existing groups from groups.txt
     $existingGroups = @{ }
     $commentedGroups = @{ }
     if (Test-Path $groupsFile) {
@@ -87,7 +89,6 @@ function Extract-Groups {
         }
     }
 
-    # Extract groups from the playlist
     $newGroups = @{ }
     Get-Content -Path $originalFile -Encoding UTF8 | ForEach-Object {
         if ($_ -like "#EXTINF:*") {
@@ -98,7 +99,6 @@ function Extract-Groups {
         }
     }
 
-    # Combine groups
     $finalGroups = @{ }
     foreach ($group in $newGroups.Keys) {
         if ($existingGroups.ContainsKey($group)) {
@@ -116,7 +116,6 @@ function Extract-Groups {
         }
     }
 
-    # Write to groups file
     $finalGroups.GetEnumerator() | Sort-Object -Property Name | ForEach-Object {
         if ($_.Value -eq "commented") {
             "// $($_.Key)"
@@ -128,6 +127,7 @@ function Extract-Groups {
     Log "Groups have been extracted and saved to '$groupsFile'."
 }
 
+# Load active groups from groups file
 function Get-Active-Groups {
     Log "Loading active groups from '$groupsFile'..."
     if (-Not (Test-Path $groupsFile)) {
@@ -139,6 +139,7 @@ function Get-Active-Groups {
     return $activeGroups
 }
 
+# Download playlist
 function Download-Playlist {
     Log "Downloading a new playlist..."
     $playlistUrl = "$($config.BaseUrl)?username=$($config.Username)&password=$($config.Password)&type=$($config.Type)&output=$($config.Output)"
@@ -172,38 +173,32 @@ function Download-Playlist {
     }
 }
 
-# Add EPG Processing Function
+# Process EPG data
 function Process-EPG {
     Log "Processing EPG data..."
-
-    # Check if EPG processing is enabled in the configuration
     if (-not $config.EnableEPG) {
         Log "EPG processing is disabled in the configuration."
         return
     }
 
-    # Construct EPG URL
     $epgUrl = "$($config.BaseUrl.Replace('get.php', 'xmltv.php'))?username=$($config.Username)&password=$($config.Password)"
-    $epgFile = [System.IO.Path]::ChangeExtension($filteredFile, ".xml") # Save EPG alongside filtered playlist with .xml extension
+    $epgFile = [System.IO.Path]::ChangeExtension($filteredFile, ".xml")
 
     try {
         Log "Downloading EPG from '$epgUrl' in chunks..."
-
-        # Create HttpClient to stream the file
         $httpClient = New-Object System.Net.Http.HttpClient
         $response = $httpClient.GetAsync($epgUrl, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).Result
 
         if (-not $response.IsSuccessStatusCode) {
-            Log "Failed to download EPG. HTTP Status: $($response.StatusCode) - $($response.StatusDescription)"
+            Log "Failed to download EPG. HTTP Status: $($response.StatusCode)"
             return
         }
 
-        # Stream the content to a file
         $stream = $response.Content.ReadAsStream()
         try {
             $fileStream = [System.IO.File]::Open($epgFile, [System.IO.FileMode]::Create)
             try {
-                $bufferSize = 8192 # 8 KB buffer
+                $bufferSize = 8192
                 $buffer = New-Object byte[] $bufferSize
                 while (($bytesRead = $stream.Read($buffer, 0, $bufferSize)) -gt 0) {
                     $fileStream.Write($buffer, 0, $bytesRead)
@@ -219,41 +214,8 @@ function Process-EPG {
         $httpClient.Dispose()
 
     } catch {
-        Log "Failed to download or process EPG: $_. Continuing script execution."
+        Log "Failed to download or process EPG: $_"
         return
-    }
-
-    try {
-        # Parse the EPG XML
-        [xml]$epgXml = Get-Content -Path $epgFile
-        Log "Loaded EPG data from '$epgFile'."
-
-        # Extract tvg-id tags from the filtered playlist
-        $filteredTvgIds = @{}
-        Get-Content -Path $filteredFile -Encoding UTF8 | ForEach-Object {
-            if ($_ -like "#EXTINF:*") {
-                $tvgIdMatch = [Regex]::Match($_, 'tvg-id="([^"]*)"')
-                if ($tvgIdMatch.Success) {
-                    $filteredTvgIds[$tvgIdMatch.Groups[1].Value] = $true
-                }
-            }
-        }
-        Log "Extracted tvg-ids from filtered playlist: $($filteredTvgIds.Keys -join ', ')"
-
-        # Filter the EPG to include only relevant channels and programs
-        $epgXml.tv.channel | Where-Object { -Not $filteredTvgIds.ContainsKey($_.id) } | ForEach-Object {
-            $_.ParentNode.RemoveChild($_) | Out-Null
-        }
-        $epgXml.tv.programme | Where-Object { -Not $filteredTvgIds.ContainsKey($_.channel) } | ForEach-Object {
-            $_.ParentNode.RemoveChild($_) | Out-Null
-        }
-
-        # Save the filtered EPG
-        $epgXml.Save($epgFile)
-        Log "Filtered EPG data saved to '$epgFile'."
-
-    } catch {
-        Log "Failed to process the EPG file: $_. Continuing script execution."
     }
 }
 

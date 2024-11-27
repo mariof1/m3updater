@@ -173,32 +173,38 @@ function Download-Playlist {
     }
 }
 
-# Process EPG data
+# Add EPG Processing Function
 function Process-EPG {
     Log "Processing EPG data..."
+
+    # Check if EPG processing is enabled in the configuration
     if (-not $config.EnableEPG) {
         Log "EPG processing is disabled in the configuration."
         return
     }
 
+    # Construct EPG URL
     $epgUrl = "$($config.BaseUrl.Replace('get.php', 'xmltv.php'))?username=$($config.Username)&password=$($config.Password)"
-    $epgFile = [System.IO.Path]::ChangeExtension($filteredFile, ".xml")
+    $epgFile = [System.IO.Path]::ChangeExtension($filteredFile, ".xml") # Save EPG alongside filtered playlist with .xml extension
 
     try {
         Log "Downloading EPG from '$epgUrl' in chunks..."
+
+        # Create HttpClient to stream the file
         $httpClient = New-Object System.Net.Http.HttpClient
         $response = $httpClient.GetAsync($epgUrl, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).Result
 
         if (-not $response.IsSuccessStatusCode) {
-            Log "Failed to download EPG. HTTP Status: $($response.StatusCode)"
+            Log "Failed to download EPG. HTTP Status: $($response.StatusCode) - $($response.StatusDescription)"
             return
         }
 
+        # Stream the content to a file
         $stream = $response.Content.ReadAsStream()
         try {
             $fileStream = [System.IO.File]::Open($epgFile, [System.IO.FileMode]::Create)
             try {
-                $bufferSize = 8192
+                $bufferSize = 8192 # 8 KB buffer
                 $buffer = New-Object byte[] $bufferSize
                 while (($bytesRead = $stream.Read($buffer, 0, $bufferSize)) -gt 0) {
                     $fileStream.Write($buffer, 0, $bytesRead)
@@ -214,10 +220,44 @@ function Process-EPG {
         $httpClient.Dispose()
 
     } catch {
-        Log "Failed to download or process EPG: $_"
+        Log "Failed to download or process EPG: $_. Continuing script execution."
         return
     }
+
+    try {
+        # Parse the EPG XML
+        [xml]$epgXml = Get-Content -Path $epgFile
+        Log "Loaded EPG data from '$epgFile'."
+
+        # Extract tvg-id tags from the filtered playlist
+        $filteredTvgIds = @{}
+        Get-Content -Path $filteredFile -Encoding UTF8 | ForEach-Object {
+            if ($_ -like "#EXTINF:*") {
+                $tvgIdMatch = [Regex]::Match($_, 'tvg-id="([^"]*)"')
+                if ($tvgIdMatch.Success) {
+                    $filteredTvgIds[$tvgIdMatch.Groups[1].Value] = $true
+                }
+            }
+        }
+        Log "Extracted tvg-ids from filtered playlist: $($filteredTvgIds.Keys -join ', ')"
+
+        # Filter the EPG to include only relevant channels and programs
+        $epgXml.tv.channel | Where-Object { -Not $filteredTvgIds.ContainsKey($_.id) } | ForEach-Object {
+            $_.ParentNode.RemoveChild($_) | Out-Null
+        }
+        $epgXml.tv.programme | Where-Object { -Not $filteredTvgIds.ContainsKey($_.channel) } | ForEach-Object {
+            $_.ParentNode.RemoveChild($_) | Out-Null
+        }
+
+        # Save the filtered EPG
+        $epgXml.Save($epgFile)
+        Log "Filtered EPG data saved to '$epgFile'."
+
+    } catch {
+        Log "Failed to process the EPG file: $_. Continuing script execution."
+    }
 }
+
 
 # Main Execution
 $excludeFilter = @()

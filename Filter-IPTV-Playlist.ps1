@@ -173,7 +173,6 @@ function Download-Playlist {
     }
 }
 
-# Add EPG Processing Function
 function Process-EPG {
     Log "Processing EPG data..."
 
@@ -194,8 +193,14 @@ function Process-EPG {
         $httpClient = New-Object System.Net.Http.HttpClient
         $response = $httpClient.GetAsync($epgUrl, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).Result
 
+        if (-not $response) {
+            Log "No response received from the server. Exiting EPG processing."
+            return
+        }
+
         if (-not $response.IsSuccessStatusCode) {
-            Log "Failed to download EPG. HTTP Status: $($response.StatusCode) - $($response.StatusDescription)"
+            Log "Failed to download EPG. HTTP Status: $($response.StatusCode) - $($response.ReasonPhrase)"
+            Log "Raw Response Details: $response"
             return
         }
 
@@ -220,7 +225,7 @@ function Process-EPG {
         $httpClient.Dispose()
 
     } catch {
-        Log "Failed to download or process EPG: $_. Continuing script execution."
+        Log "Failed to download or process EPG: $_"
         return
     }
 

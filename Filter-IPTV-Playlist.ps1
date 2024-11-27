@@ -187,15 +187,37 @@ function Process-EPG {
     $epgFile = [System.IO.Path]::ChangeExtension($filteredFile, ".xml") # Save EPG alongside filtered playlist with .xml extension
 
     try {
-        Log "Downloading EPG from '$epgUrl'..."
-        $response = Invoke-WebRequest -Uri $epgUrl -Method Get -UseBasicParsing -ErrorAction Stop
-        if ($response.StatusCode -eq 200) {
-            $response.Content | Set-Content -Path $epgFile -Encoding UTF8
-            Log "EPG data downloaded and saved to '$epgFile'."
-        } else {
+        Log "Downloading EPG from '$epgUrl' in chunks..."
+
+        # Create HttpClient to stream the file
+        $httpClient = New-Object System.Net.Http.HttpClient
+        $response = $httpClient.GetAsync($epgUrl, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).Result
+
+        if (-not $response.IsSuccessStatusCode) {
             Log "Failed to download EPG. HTTP Status: $($response.StatusCode) - $($response.StatusDescription)"
             return
         }
+
+        # Stream the content to a file
+        $stream = $response.Content.ReadAsStream()
+        try {
+            $fileStream = [System.IO.File]::Open($epgFile, [System.IO.FileMode]::Create)
+            try {
+                $bufferSize = 8192 # 8 KB buffer
+                $buffer = New-Object byte[] $bufferSize
+                while (($bytesRead = $stream.Read($buffer, 0, $bufferSize)) -gt 0) {
+                    $fileStream.Write($buffer, 0, $bytesRead)
+                }
+                Log "EPG data downloaded and saved to '$epgFile'."
+            } finally {
+                $fileStream.Close()
+            }
+        } finally {
+            $stream.Close()
+        }
+
+        $httpClient.Dispose()
+
     } catch {
         Log "Failed to download or process EPG: $_. Continuing script execution."
         return

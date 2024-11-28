@@ -8,9 +8,50 @@ function Resolve-ConfigPath {
         throw "Configuration contains an empty or null path. Please check your configuration file."
     }
     if ([IO.Path]::IsPathRooted($path)) {
+        # For absolute paths, return as-is
         return $path
     } else {
+        # For relative paths, join with the base path
         return Join-Path -Path $basePath -ChildPath $path
+    }
+}
+
+# Function to create a sample config.json file
+function Create-SampleConfig {
+    param (
+        [string]$configPath
+    )
+    $sampleConfig = @{
+        BaseUrl                 = "http://example.com"
+        EnableEPG              = $true
+        Username               = "sampleUsername"
+        Password               = "samplePassword"
+        Type                   = "m3u_plus"
+        Output                 = "ts"
+        OriginalPlaylist       = "original_playlist.m3u"
+        FilteredPlaylist       = "filtered_playlist.m3u"
+        GroupsFile             = "groups.txt"
+        ExtractGroups          = $true
+        ExcludeFilter          = @("###", "Sample Group 1", "Sample Group 2")
+        PlaylistAgeThresholdDays = 3
+        DebugMode              = $true
+        LogFile                = "script_log.txt"
+    }
+
+    $sampleConfig | ConvertTo-Json -Depth 2 | Set-Content -Path $configPath -Encoding UTF8
+    Write-Host "Sample configuration file created at '$configPath'. Please update it with your settings and rerun the script."
+}
+
+# Function to build a URL with dynamic endpoints
+function Build-Url {
+    param (
+        [string]$baseUrl,
+        [string]$endpoint
+    )
+    if ($baseUrl.EndsWith("/")) {
+        return "$baseUrl$endpoint"
+    } else {
+        return "$baseUrl/$endpoint"
     }
 }
 
@@ -18,9 +59,15 @@ function Resolve-ConfigPath {
 if ($args.Count -eq 0) {
     $scriptPath = Split-Path -Path $MyInvocation.MyCommand.Definition -Parent
     $configFile = Join-Path -Path $scriptPath -ChildPath "config.json"
-    Write-Host "No configuration file provided. Using default: $configFile"
+    if (-Not (Test-Path $configFile)) {
+        Write-Host "No configuration file provided and none found in the script directory. Creating a sample configuration file..."
+        Create-SampleConfig -configPath $configFile
+        exit
+    } else {
+        Write-Host "Using default configuration file: $configFile"
+    }
 } else {
-    $configFile = $args[0]
+    $configFile = Resolve-ConfigPath -basePath (Get-Location).Path -path $args[0]
     Write-Host "Using configuration file: $configFile"
 }
 
@@ -142,7 +189,8 @@ function Get-Active-Groups {
 # Download playlist
 function Download-Playlist {
     Log "Downloading a new playlist..."
-    $playlistUrl = "$($config.BaseUrl)?username=$($config.Username)&password=$($config.Password)&type=$($config.Type)&output=$($config.Output)"
+    $playlistUrl = Build-Url -baseUrl $config.BaseUrl -endpoint "get.php"
+    $playlistUrl += "?username=$($config.Username)&password=$($config.Password)&type=$($config.Type)&output=$($config.Output)"
 
     try {
         $httpClient = New-Object System.Net.Http.HttpClient
@@ -183,7 +231,8 @@ function Process-EPG {
     }
 
     # Construct EPG URL
-    $epgUrl = "$($config.BaseUrl.Replace('get.php', 'xmltv.php'))?username=$($config.Username)&password=$($config.Password)"
+    $epgUrl = Build-Url -baseUrl $config.BaseUrl -endpoint "xmltv.php"
+    $epgUrl += "?username=$($config.Username)&password=$($config.Password)"
     $epgFile = [System.IO.Path]::ChangeExtension($filteredFile, ".xml") # Save EPG alongside filtered playlist with .xml extension
 
     try {
@@ -200,7 +249,6 @@ function Process-EPG {
 
         if (-not $response.IsSuccessStatusCode) {
             Log "Failed to download EPG. HTTP Status: $($response.StatusCode) - $($response.ReasonPhrase)"
-            Log "Raw Response Details: $response"
             return
         }
 
@@ -228,41 +276,7 @@ function Process-EPG {
         Log "Failed to download or process EPG: $_"
         return
     }
-
-    try {
-        # Parse the EPG XML
-        [xml]$epgXml = Get-Content -Path $epgFile
-        Log "Loaded EPG data from '$epgFile'."
-
-        # Extract tvg-id tags from the filtered playlist
-        $filteredTvgIds = @{}
-        Get-Content -Path $filteredFile -Encoding UTF8 | ForEach-Object {
-            if ($_ -like "#EXTINF:*") {
-                $tvgIdMatch = [Regex]::Match($_, 'tvg-id="([^"]*)"')
-                if ($tvgIdMatch.Success) {
-                    $filteredTvgIds[$tvgIdMatch.Groups[1].Value] = $true
-                }
-            }
-        }
-        Log "Extracted tvg-ids from filtered playlist: $($filteredTvgIds.Keys -join ', ')"
-
-        # Filter the EPG to include only relevant channels and programs
-        $epgXml.tv.channel | Where-Object { -Not $filteredTvgIds.ContainsKey($_.id) } | ForEach-Object {
-            $_.ParentNode.RemoveChild($_) | Out-Null
-        }
-        $epgXml.tv.programme | Where-Object { -Not $filteredTvgIds.ContainsKey($_.channel) } | ForEach-Object {
-            $_.ParentNode.RemoveChild($_) | Out-Null
-        }
-
-        # Save the filtered EPG
-        $epgXml.Save($epgFile)
-        Log "Filtered EPG data saved to '$epgFile'."
-
-    } catch {
-        Log "Failed to process the EPG file: $_. Continuing script execution."
-    }
 }
-
 
 # Main Execution
 $excludeFilter = @()

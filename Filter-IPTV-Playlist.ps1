@@ -379,14 +379,11 @@ if ($config.ExtractGroups -eq $true) {
     Extract-Groups
 }
 
+# Filter the playlist first
 $activeGroups = Get-Active-Groups
 Log "Active groups for filtering: $($activeGroups -join ', ')"
 
-if ($config.EnableEPG -eq $true) {
-    Process-EPG
-}
-
-Write-Host "Filtering playlist by groups has started..."
+Log "Filtering playlist by groups has started..."
 $filteredLines = @("#EXTM3U")
 $includeLine = $false
 
@@ -413,6 +410,11 @@ Get-Content -Path $originalFile -Encoding UTF8 | ForEach-Object {
     }
 }
 
+# Save the filtered playlist
 $filteredLines | Set-Content -Path $filteredFile -Encoding UTF8
 Log "Filtered playlist has been saved to '$filteredFile'."
-Write-Host "Filtered playlist has been saved to '$filteredFile'."
+
+# Ensure EPG processing runs after filtering the playlist
+if ($config.EnableEPG -eq $true) {
+    Process-EPG
+}

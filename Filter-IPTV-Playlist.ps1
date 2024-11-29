@@ -113,66 +113,86 @@ function Log {
     }
 }
 
-# Extract groups from the playlist
 function Extract-Groups {
     Log "Extracting groups from the original playlist..."
+
+    # Validate the original playlist file exists
     if (-Not (Test-Path $originalFile)) {
         Write-Error "Original playlist file not found. Cannot extract groups."
         exit
     }
 
+    # Dictionaries to hold group states
     $existingGroups = @{ }
     $commentedGroups = @{ }
+
+    # Read the current groups.txt file if it exists
     if (Test-Path $groupsFile) {
         Get-Content -Path $groupsFile -Encoding UTF8 | ForEach-Object {
             if ($_ -like "//*") {
+                # Commented-out group
                 $groupName = $_.TrimStart("/").Trim()
                 if ($groupName -ne "") {
                     $commentedGroups[$groupName] = $true
                 }
             } elseif ($_.Trim() -ne "") {
+                # Active group
                 $existingGroups[$_.Trim()] = $true
             }
         }
     }
 
+    # Extract groups from the original playlist
     $newGroups = @{ }
     Get-Content -Path $originalFile -Encoding UTF8 | ForEach-Object {
         if ($_ -like "#EXTINF:*") {
             $groupMatch = [Regex]::Match($_, 'group-title="([^"]*)"')
             if ($groupMatch.Success) {
-                $newGroups[$groupMatch.Groups[1].Value] = $true
+                $groupName = $groupMatch.Groups[1].Value.Trim()
+                if ($groupName -ne "") {
+                    $newGroups[$groupName] = $true
+                }
             }
         }
     }
 
+    # Merge all groups, prioritizing existing state
     $finalGroups = @{ }
     foreach ($group in $newGroups.Keys) {
         if ($existingGroups.ContainsKey($group)) {
-            $finalGroups[$group] = "active"
+            $finalGroups[$group] = "active"  # Keep as active
         } elseif ($commentedGroups.ContainsKey($group)) {
-            $finalGroups[$group] = "commented"
+            $finalGroups[$group] = "commented"  # Keep as commented
         } else {
-            $finalGroups[$group] = "commented"
+            $finalGroups[$group] = "commented"  # New group: default to commented
         }
     }
 
+    # Include groups from groups.txt not in the new playlist
     foreach ($group in $existingGroups.Keys + $commentedGroups.Keys) {
         if (-not $finalGroups.ContainsKey($group)) {
-            $finalGroups[$group] = "commented"
+            $finalGroups[$group] = "commented"  # Keep as commented if not found in playlist
         }
     }
 
+    # Write the updated groups list to groups.txt
+    Log "Attempting to save groups to '$groupsFile'..."
     $finalGroups.GetEnumerator() | Sort-Object -Property Name | ForEach-Object {
         if ($_.Value -eq "commented") {
             "// $($_.Key)"
         } else {
             $_.Key
         }
-    } | Set-Content -Path $groupsFile -Encoding UTF8
+    } | Out-File -FilePath $groupsFile -Encoding UTF8
 
-    Log "Groups have been extracted and saved to '$groupsFile'."
+    if (Test-Path $groupsFile) {
+        Log "Groups file successfully saved to '$groupsFile'."
+    } else {
+        Write-Error "Failed to save groups file to '$groupsFile'. Check permissions and path."
+        exit
+    }
 }
+
 
 # Load active groups from groups file
 function Get-Active-Groups {
@@ -185,6 +205,7 @@ function Get-Active-Groups {
     $activeGroups = Get-Content -Path $groupsFile -Encoding UTF8 | Where-Object { -Not ($_ -like "//*") }
     return $activeGroups
 }
+
 
 # Download playlist
 function Download-Playlist {
@@ -239,7 +260,7 @@ function Process-EPG {
         Log "Downloading EPG from '$epgUrl' in chunks..."
 
         # Create HttpClient to stream the file
-        $httpClient = New-Object System.Net.Http.HttpClient
+        $httpClient = [System.Net.Http.HttpClient]::new()
         $response = $httpClient.GetAsync($epgUrl, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).Result
 
         if (-not $response) {
@@ -264,18 +285,69 @@ function Process-EPG {
                 }
                 Log "EPG data downloaded and saved to '$epgFile'."
             } finally {
-                $fileStream.Close()
+                $fileStream.Dispose()
             }
         } finally {
-            $stream.Close()
+            $stream.Dispose()
         }
-
-        $httpClient.Dispose()
 
     } catch {
         Log "Failed to download or process EPG: $_"
         return
+    } finally {
+        if ($httpClient) {
+            $httpClient.Dispose()
+        }
     }
+
+    # Validate the downloaded EPG file
+    if (-not (Test-Path $epgFile) -or (Get-Item $epgFile).Length -eq 0) {
+        Log "Downloaded EPG file is empty or missing: '$epgFile'."
+        return
+    }
+
+    # Filter EPG data based on tvg-id from the filtered playlist
+    try {
+        Log "Filtering EPG data based on tvg-id from the filtered playlist..."
+
+        # Extract tvg-id values from the filtered playlist
+        $filteredTvgIds = @{}
+        Get-Content -Path $filteredFile -Encoding UTF8 | ForEach-Object {
+            if ($_ -like "#EXTINF:*") {
+                $tvgIdMatch = [Regex]::Match($_, 'tvg-id="([^"]*)"')
+                if ($tvgIdMatch.Success) {
+                    $filteredTvgIds[$tvgIdMatch.Groups[1].Value] = $true
+                }
+            }
+        }
+
+        if ($filteredTvgIds.Count -eq 0) {
+            Log "No tvg-id values found in the filtered playlist. Skipping EPG filtering."
+            return
+        }
+
+        # Load the downloaded EPG XML
+        [xml]$epgXml = Get-Content -Path $epgFile
+
+        # Remove channels and programmes that do not match the filtered tvg-ids
+        $epgXml.tv.channel | Where-Object { -Not $filteredTvgIds.ContainsKey($_.id) } | ForEach-Object {
+            $_.ParentNode.RemoveChild($_) | Out-Null
+        }
+
+        $epgXml.tv.programme | Where-Object { -Not $filteredTvgIds.ContainsKey($_.channel) } | ForEach-Object {
+            $_.ParentNode.RemoveChild($_) | Out-Null
+        }
+
+        # Save the filtered EPG XML back to the file
+        $epgXml.Save($epgFile)
+        Log "Filtered EPG data saved to '$epgFile'."
+
+    } catch {
+        Log "Failed to filter the EPG file: $_"
+        return
+    }
+
+    Log "EPG processing completed successfully."
 }
 
 # Main Execution

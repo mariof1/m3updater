@@ -251,58 +251,34 @@ function Process-EPG {
         return
     }
 
-    # Construct EPG URL
-    $epgUrl = Build-Url -baseUrl $config.BaseUrl -endpoint "xmltv.php"
-    $epgUrl += "?username=$($config.Username)&password=$($config.Password)"
-    $epgFile = [System.IO.Path]::ChangeExtension($filteredFile, ".xml") # Save EPG alongside filtered playlist with .xml extension
+    # Define file paths for original and filtered EPG files
+    $originalEpgFile = [System.IO.Path]::ChangeExtension($originalFile, ".xml") # Same name as original playlist
+    $filteredEpgFile = [System.IO.Path]::ChangeExtension($filteredFile, ".xml") # Same name as filtered playlist
 
-    try {
-        Log "Downloading EPG from '$epgUrl' in chunks..."
+    # Get threshold for EPG file age
+    $epgAgeThresholdDays = $config.PlaylistAgeThresholdDays
+    if (-Not $epgAgeThresholdDays) {
+        Write-Warning "PlaylistAgeThresholdDays not defined in config. Defaulting to 1 day."
+        $epgAgeThresholdDays = 1
+    }
 
-        # Create HttpClient to stream the file
-        $httpClient = [System.Net.Http.HttpClient]::new()
-        $response = $httpClient.GetAsync($epgUrl, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).Result
-
-        if (-not $response) {
-            Log "No response received from the server. Exiting EPG processing."
-            return
+    # Skip download if the original EPG file already exists and is within the age threshold
+    if (Test-Path $originalEpgFile) {
+        $fileAge = (Get-Date) - (Get-Item $originalEpgFile).LastWriteTime
+        if ($fileAge.TotalDays -le $epgAgeThresholdDays) {
+            Log "Original EPG file '$originalEpgFile' is within the age threshold of $epgAgeThresholdDays day(s). Skipping download."
+        } else {
+            Log "Original EPG file '$originalEpgFile' is older than $epgAgeThresholdDays day(s). Downloading a new EPG..."
+            Download-Epg $originalEpgFile
         }
-
-        if (-not $response.IsSuccessStatusCode) {
-            Log "Failed to download EPG. HTTP Status: $($response.StatusCode) - $($response.ReasonPhrase)"
-            return
-        }
-
-        # Stream the content to a file
-        $stream = $response.Content.ReadAsStream()
-        try {
-            $fileStream = [System.IO.File]::Open($epgFile, [System.IO.FileMode]::Create)
-            try {
-                $bufferSize = 8192 # 8 KB buffer
-                $buffer = New-Object byte[] $bufferSize
-                while (($bytesRead = $stream.Read($buffer, 0, $bufferSize)) -gt 0) {
-                    $fileStream.Write($buffer, 0, $bytesRead)
-                }
-                Log "EPG data downloaded and saved to '$epgFile'."
-            } finally {
-                $fileStream.Dispose()
-            }
-        } finally {
-            $stream.Dispose()
-        }
-
-    } catch {
-        Log "Failed to download or process EPG: $_"
-        return
-    } finally {
-        if ($httpClient) {
-            $httpClient.Dispose()
-        }
+    } else {
+        Log "Original EPG file '$originalEpgFile' does not exist. Downloading a new EPG..."
+        Download-Epg $originalEpgFile
     }
 
     # Validate the downloaded EPG file
-    if (-not (Test-Path $epgFile) -or (Get-Item $epgFile).Length -eq 0) {
-        Log "Downloaded EPG file is empty or missing: '$epgFile'."
+    if (-not (Test-Path $originalEpgFile) -or (Get-Item $originalEpgFile).Length -eq 0) {
+        Log "Original EPG file is empty or missing: '$originalEpgFile'."
         return
     }
 
@@ -326,8 +302,8 @@ function Process-EPG {
             return
         }
 
-        # Load the downloaded EPG XML
-        [xml]$epgXml = Get-Content -Path $epgFile
+        # Load the original EPG XML
+        [xml]$epgXml = Get-Content -Path $originalEpgFile
 
         # Remove channels and programmes that do not match the filtered tvg-ids
         $epgXml.tv.channel | Where-Object { -Not $filteredTvgIds.ContainsKey($_.id) } | ForEach-Object {
@@ -338,9 +314,9 @@ function Process-EPG {
             $_.ParentNode.RemoveChild($_) | Out-Null
         }
 
-        # Save the filtered EPG XML back to the file
-        $epgXml.Save($epgFile)
-        Log "Filtered EPG data saved to '$epgFile'."
+        # Save the filtered EPG XML to the filtered EPG file
+        $epgXml.Save($filteredEpgFile)
+        Log "Filtered EPG data saved to '$filteredEpgFile'."
 
     } catch {
         Log "Failed to filter the EPG file: $_"
@@ -350,11 +326,61 @@ function Process-EPG {
     Log "EPG processing completed successfully."
 }
 
-# Main Execution
-$excludeFilter = @()
-if ($null -ne $config.ExcludeFilter) {
-    $excludeFilter = $config.ExcludeFilter | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.ToLower() }
+# Helper function to download the EPG file
+function Download-Epg {
+    param (
+        [string]$destination
+    )
+
+    # Construct EPG URL
+    $epgUrl = Build-Url -baseUrl $config.BaseUrl -endpoint "xmltv.php"
+    $epgUrl += "?username=$($config.Username)&password=$($config.Password)"
+
+    try {
+        Log "Downloading EPG from '$epgUrl'..."
+
+        # Create HttpClient to stream the file
+        $httpClient = [System.Net.Http.HttpClient]::new()
+        $response = $httpClient.GetAsync($epgUrl, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).Result
+
+        if (-not $response) {
+            Log "No response received from the server. Exiting EPG processing."
+            return
+        }
+
+        if (-not $response.IsSuccessStatusCode) {
+            Log "Failed to download EPG. HTTP Status: $($response.StatusCode) - $($response.ReasonPhrase)"
+            return
+        }
+
+        # Stream the content to the destination file
+        $stream = $response.Content.ReadAsStream()
+        try {
+            $fileStream = [System.IO.File]::Open($destination, [System.IO.FileMode]::Create)
+            try {
+                $bufferSize = 8192 # 8 KB buffer
+                $buffer = New-Object byte[] $bufferSize
+                while (($bytesRead = $stream.Read($buffer, 0, $bufferSize)) -gt 0) {
+                    $fileStream.Write($buffer, 0, $bytesRead)
+                }
+                Log "EPG data downloaded and saved to '$destination'."
+            } finally {
+                $fileStream.Dispose()
+            }
+        } finally {
+            $stream.Dispose()
+        }
+
+    } catch {
+        Log "Failed to download EPG to '$destination': $_"
+        return
+    } finally {
+        if ($httpClient) {
+            $httpClient.Dispose()
+        }
+    }
 }
+
 
 $playlistAgeThresholdDays = $config.PlaylistAgeThresholdDays
 if (-Not $playlistAgeThresholdDays) {
